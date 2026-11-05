@@ -2,7 +2,7 @@
 /* Workbench — project tracker PWA. All data lives on the device:
    projects in localStorage, photos in IndexedDB. No server. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.0.1';
 const KEY = 'workbench.v1';
 const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#30b0c7', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#a2845e', '#8e8e93'];
 const STATUSES = { active: 'Active', waiting: 'Waiting', paused: 'Paused', done: 'Done' };
@@ -95,6 +95,39 @@ const isIdle = (p) => p.status === 'active' && state.settings.staleDays > 0 &&
   daysSince(p.lastWorked || p.created) >= state.settings.staleDays;
 function addLog(p, text, kind = 'note', hours = 0) {
   p.log.unshift({ id: uid(), at: now(), text, kind, hours: hours || 0 });
+}
+
+/* unsaved new/edit form, kept so it survives the app being backgrounded or killed */
+const DRAFT_KEY = 'workbench.draft';
+function readDraft() {
+  try { const d = JSON.parse(localStorage.getItem(DRAFT_KEY)); return d && d.route && d.values ? d : null; }
+  catch (e) { return null; }
+}
+function saveDraft(f) {
+  const values = {};
+  for (const el of f.elements) {
+    if (!el.name) continue;
+    if (el.type === 'radio') { if (el.checked) values[el.name] = el.value; } else values[el.name] = el.value;
+  }
+  try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ route: route().join('/'), at: now(), values })); } catch (e) { /* storage full */ }
+}
+function clearDraft() { try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* ignore */ } }
+function restoreDraft(f) {
+  const d = readDraft();
+  if (!f || !d || d.route !== route().join('/')) return false;
+  for (const el of f.elements) {
+    if (!el.name || !(el.name in d.values)) continue;
+    if (el.type === 'radio') el.checked = el.value === d.values[el.name];
+    else el.value = d.values[el.name];
+  }
+  return true;
+}
+// A draft that still points at something real (an edit draft needs its project to exist).
+function liveDraft() {
+  const d = readDraft(); if (!d) return null;
+  const [r0, id] = d.route.split('/');
+  if (r0 === 'new' || (r0 === 'edit' && getP(id))) return d;
+  clearDraft(); return null;
 }
 
 /* undo (one level, in-session) */
@@ -249,11 +282,11 @@ function render() {
       if (!p) { location.replace('#/'); return; }
       v.innerHTML = viewDetail(p); break;
     }
-    case 'new': v.innerHTML = viewEdit(null); break;
+    case 'new': v.innerHTML = viewEdit(null); if (restoreDraft($('#pform'))) toast('Restored your unsaved project'); break;
     case 'edit': {
       const p = getP(r[1]);
       if (!p) { location.replace('#/'); return; }
-      v.innerHTML = viewEdit(p); break;
+      v.innerHTML = viewEdit(p); if (restoreDraft($('#pform'))) toast('Restored your unsaved changes'); break;
     }
     case 'shop': tab = 'shop'; v.innerHTML = viewShop(); break;
     case 'cal': tab = 'cal'; v.innerHTML = viewUpcoming(); break;
@@ -273,6 +306,12 @@ function viewHome() {
   let banners = '';
   if (isIOS() && !isStandalone() && !s.installDismissed) {
     banners += `<div class="banner"><div class="grow"><b>Install on your iPhone</b>Tap <b style="display:inline">Share</b> → <b style="display:inline">Add to Home Screen</b> so it opens full-screen, works offline and keeps your data safe.</div><button class="x" data-act="dismissInstall" aria-label="Dismiss">×</button></div>`;
+  }
+  const draft = liveDraft();
+  if (draft) {
+    const isNew = draft.route.startsWith('new');
+    const name = draft.values.name?.trim() || (isNew ? '' : getP(draft.route.split('/')[1])?.name);
+    banners += `<div class="banner"><div class="grow"><b>${isNew ? 'Unsaved new project' : 'Unsaved edits'}</b>${name ? `“${esc(name)}” — ` : ''}pick up where you left off.</div><button class="btn" data-act="resumeDraft">Resume</button><button class="x" data-act="discardDraft" aria-label="Discard draft">×</button></div>`;
   }
   const backupAge = s.lastBackup ? daysSince(s.lastBackup) : Infinity;
   if (ps.length >= 1 && backupAge > 30) {
@@ -520,7 +559,7 @@ function viewEdit(p) {
   const cats = [...new Set(state.projects.map((x) => x.category).filter(Boolean))];
   const radios = (name, obj, cur) => Object.entries(obj).map(([k, l]) => `<label><input type="radio" name="${name}" value="${k}" ${cur === k ? 'checked' : ''}>${l}</label>`).join('');
   return `
-  <header class="topbar"><a href="${isNew ? '#/' : `#/p/${p.id}`}">Cancel</a><span class="tb-title">${isNew ? 'New Project' : 'Edit Project'}</span>
+  <header class="topbar"><a href="${isNew ? '#/' : `#/p/${p.id}`}" data-act="cancelEdit" data-href="${isNew ? '#/' : `#/p/${p.id}`}">Cancel</a><span class="tb-title">${isNew ? 'New Project' : 'Edit Project'}</span>
     <button type="submit" form="pform" class="tb-btn right tb-save">Save</button></header>
   <form id="pform" data-submit="saveProject" data-id="${isNew ? '' : p.id}" style="margin-top:8px">
     <div class="card form">
@@ -798,6 +837,9 @@ function setStatus(p, s) {
 const ACTIONS = {
   open: (d) => go(`#/p/${d.id}`),
   filter: (d) => { state.settings.filter = state.settings.filter === d.f && d.f !== 'open' ? 'open' : d.f; save(); render(); },
+  cancelEdit: (d) => { clearDraft(); go(d.href); },
+  resumeDraft: () => { const dr = liveDraft(); if (dr) go(`#/${dr.route}`); },
+  discardDraft: () => { clearDraft(); render(); },
   dismissInstall: () => { state.settings.installDismissed = true; save(); render(); },
   loadExample: () => { const p = exampleProject(); state.projects.push(p); save(); go(`#/p/${p.id}`); toast('Example project added'); },
   stepDone: (d) => { const [p, s] = findStep(d); if (s) completeStep(p, s); },
@@ -982,7 +1024,7 @@ const SUBMITS = {
       if (p.status === 'done') p.completedAt = now();
       state.projects.push(p);
     }
-    save(); location.replace(`#/p/${p.id}`);
+    clearDraft(); save(); location.replace(`#/p/${p.id}`);
   },
 };
 
@@ -1001,8 +1043,16 @@ document.addEventListener('click', (e) => {
   const fn = ACTIONS[a.dataset.act];
   if (fn) { e.preventDefault(); e.stopPropagation(); fn(a.dataset, a, e); }
 });
-document.addEventListener('change', (e) => { const el = e.target; if (el.dataset.change) CHANGES[el.dataset.change]?.(el.dataset, el, e); });
-document.addEventListener('input', (e) => { const el = e.target; if (el.dataset.input) INPUTS[el.dataset.input]?.(el.dataset, el, e); });
+document.addEventListener('change', (e) => {
+  const el = e.target;
+  if (el.form?.id === 'pform') saveDraft(el.form);
+  if (el.dataset.change) CHANGES[el.dataset.change]?.(el.dataset, el, e);
+});
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.form?.id === 'pform') saveDraft(el.form);
+  if (el.dataset.input) INPUTS[el.dataset.input]?.(el.dataset, el, e);
+});
 document.addEventListener('submit', (e) => {
   const f = e.target.closest('form[data-submit]');
   if (f) { e.preventDefault(); SUBMITS[f.dataset.submit]?.(f.dataset, f, e); }
@@ -1011,12 +1061,16 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && e.target.classList?.contains('inline')) { e.preventDefault(); e.target.blur(); }
   if (e.key === 'Enter' && e.target.classList?.contains('pcard')) go(`#/p/${e.target.dataset.id}`);
 });
-// Flush notes if the app is backgrounded mid-typing.
+// Flush notes / form draft if the app is backgrounded mid-typing.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     const ta = $('textarea.notes');
     if (ta) { clearTimeout(notesTimer); const p = getP(ta.dataset.id); if (p && p.notes !== ta.value) { p.notes = ta.value; touch(p); save(); } }
-  } else render(); // refresh relative dates/countdowns when reopened
+    const f = $('#pform');
+    if (f && readDraft()?.route === route().join('/')) saveDraft(f);
+  } else if (!['new', 'edit'].includes(route()[0])) {
+    render(); // refresh relative dates/countdowns when reopened (but never wipe a half-filled form)
+  }
 });
 
 /* ---------------- lightbox ---------------- */
@@ -1063,6 +1117,9 @@ function applyTheme() {
 
 function boot() {
   applyTheme();
+  // If iOS closed the app while a form was half-filled, reopen straight into it.
+  const draft = liveDraft();
+  if (draft && !route().length && Date.now() - new Date(draft.at) < 2 * 3600000) location.replace(`#/${draft.route}`);
   render();
   navigator.storage?.persist?.().catch(() => {});
   // Remove photos whose project no longer exists (e.g. deleted in an earlier session).
