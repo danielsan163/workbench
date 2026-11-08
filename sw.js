@@ -1,5 +1,5 @@
 // Bump VERSION when the list of ASSETS changes (or to force-refresh the offline cache).
-const VERSION = 'wb-v1.0.2';
+const VERSION = 'wb-v1.1.0';
 const ASSETS = [
   './',
   'index.html',

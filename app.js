@@ -2,7 +2,7 @@
 /* Workbench — project tracker PWA. All data lives on the device:
    projects in localStorage, photos in IndexedDB. No server. */
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.1.0';
 const KEY = 'workbench.v1';
 const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#30b0c7', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#a2845e', '#8e8e93'];
 const STATUSES = { active: 'Active', waiting: 'Waiting', paused: 'Paused', done: 'Done' };
@@ -26,6 +26,15 @@ const daysUntil = (s) => Math.round((parseYmd(s) - parseYmd(todayStr())) / 86400
 const daysSince = (iso) => (iso ? Math.round((parseYmd(todayStr()) - parseYmd(ymd(new Date(iso)))) / 86400000) : Infinity);
 const addDays = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return ymd(d); };
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const fmtHours = (h) => {
+  const m = Math.round((h || 0) * 60);
+  if (m < 60) return `${m}m`;
+  return m % 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m / 60}h`;
+};
+const itemCost = (i) => (parseFloat(i.cost) || 0) * (parseFloat(i.qty) || 1);
+const sumCost = (list) => list.reduce((n, i) => n + itemCost(i), 0);
+const matCost = (p) => sumCost(p.items.filter((i) => i.type !== 'tool'));
+const loggedHours = (p) => p.log.reduce((n, l) => n + (l.hours || 0), 0);
 const money = (n) => Number(n).toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: n % 1 ? 2 : 0 });
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const isStandalone = () => navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
@@ -59,7 +68,7 @@ function deadlineInfo(p) {
 function blankState() {
   return {
     version: 1, projects: [],
-    settings: { theme: 'auto', staleDays: 14, lastBackup: null, badge: false, installDismissed: false, sort: 'smart', filter: 'open', shopGroup: 'project' },
+    settings: { theme: 'auto', staleDays: 14, lastBackup: null, badge: false, askTime: true, installDismissed: false, sort: 'smart', filter: 'open', shopGroup: 'project' },
   };
 }
 function normalize(p) {
@@ -235,6 +244,35 @@ function sheet({ title, message, actions }) {
   });
 }
 
+/* "How long did this take?" — resolves to hours (>0), 0 to clear, or null to skip. */
+function timeSheet(stepText, current = 0) {
+  return new Promise((res) => {
+    const el = $('#sheet');
+    const presets = [[0.25, '15m'], [0.5, '30m'], [0.75, '45m'], [1, '1h'], [1.5, '1½h'], [2, '2h'], [3, '3h'], [4, '4h']];
+    const cur = Math.round(current * 60);
+    el.innerHTML = `<div class="sheet-backdrop" data-t="skip"></div><div class="sheet-panel">
+      <div class="sheet-head"><div class="sheet-title">${current ? 'Time spent on this step' : 'Nice! How long did this take?'}</div><div class="sheet-msg">${esc(stepText)}</div></div>
+      <div class="sheet-group">
+        <div class="time-grid">${presets.map(([v, l]) => `<button type="button" class="${Math.round(v * 60) === cur ? 'on' : ''}" data-t="${v}">${l}</button>`).join('')}</div>
+        <form class="time-custom"><input name="h" inputmode="decimal" placeholder="0" value="${cur ? Math.floor(cur / 60) : ''}" aria-label="Hours" autocomplete="off"><span>h</span>
+          <input name="m" inputmode="numeric" placeholder="0" value="${cur ? cur % 60 : ''}" aria-label="Minutes" autocomplete="off"><span>m</span><button class="add-btn">Save</button></form>
+        ${current ? '<button type="button" class="sheet-btn danger" data-t="0">Clear time</button>' : ''}
+      </div>
+      <button type="button" class="sheet-btn cancel" data-t="skip">${current ? 'Cancel' : 'Skip'}</button></div>`;
+    el.hidden = false;
+    const finish = (v) => { el.hidden = true; el.innerHTML = ''; el.onclick = null; el.onsubmit = null; res(v); };
+    el.onclick = (e) => {
+      const b = e.target.closest('[data-t]'); if (!b) return;
+      finish(b.dataset.t === 'skip' ? null : Number(b.dataset.t));
+    };
+    el.onsubmit = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const h = (parseFloat(e.target.h.value) || 0) + (parseFloat(e.target.m.value) || 0) / 60;
+      finish(h > 0 ? Math.round(h * 60) / 60 : null);
+    };
+  });
+}
+
 async function shareOrDownload(blob, filename, title) {
   const file = new File([blob], filename, { type: blob.type });
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -394,6 +432,7 @@ function projectCard(p) {
   const ns = nextStep(p);
   const total = p.steps.length, done = total - openSteps(p).length;
   const need = neededItems(p).length;
+  const mats = matCost(p), hrs = loggedHours(p);
   const idleDays = isIdle(p) ? daysSince(p.lastWorked || p.created) : 0;
   const cover = p.cover && p.photos.includes(p.cover) ? p.cover : p.photos[0];
   let next;
@@ -409,6 +448,8 @@ function projectCard(p) {
       <div class="pc-foot">
         ${total ? `<div class="bar"><i style="width:${(done / total) * 100}%"></i></div><span>${done}/${total}</span>` : ''}
         ${need ? `<span>🛒 ${need}</span>` : ''}
+        ${mats ? `<span>${money(mats)}</span>` : ''}
+        ${hrs ? `<span>⏱ ${fmtHours(hrs)}</span>` : ''}
         ${idleDays ? `<span class="badge idle">idle ${idleDays}d</span>` : ''}
       </div>
     </div>
@@ -424,8 +465,11 @@ function viewDetail(p) {
   const doneSteps = p.steps.filter((s) => s.done).sort((a, b) => (b.doneAt || '').localeCompare(a.doneAt || ''));
   const total = p.steps.length;
   const need = neededItems(p), have = p.items.filter((i) => i.have);
-  const cost = need.reduce((n, i) => n + (parseFloat(i.cost) || 0) * (parseFloat(i.qty) || 1), 0);
-  const hours = p.log.reduce((n, l) => n + (l.hours || 0), 0);
+  const mats = p.items.filter((i) => i.type !== 'tool');
+  const matTotal = sumCost(mats), matHave = sumCost(mats.filter((i) => i.have));
+  const toolTotal = sumCost(p.items.filter((i) => i.type === 'tool'));
+  const unpriced = mats.filter((i) => !parseFloat(i.cost)).length;
+  const hours = loggedHours(p);
 
   let nextCard;
   if (ns) {
@@ -454,13 +498,16 @@ function viewDetail(p) {
   const stepRow = (s, i, arr) => `<li class="row ${s.done ? 'done' : ''}">
     <label class="check"><input type="checkbox" ${s.done ? 'checked' : ''} data-change="stepToggle" data-id="${p.id}" data-sid="${s.id}" aria-label="Done"><span></span></label>
     <input class="inline" value="${esc(s.text)}" data-change="stepText" data-id="${p.id}" data-sid="${s.id}" enterkeyhint="done" aria-label="Step">
+    ${s.done ? `<button type="button" class="time-tag ${s.hours ? '' : 'empty'}" data-act="stepTime" data-id="${p.id}" data-sid="${s.id}" aria-label="Time spent">${s.hours ? `⏱ ${fmtHours(s.hours)}` : '+ time'}</button>` : ''}
     ${ui.editSteps && !s.done ? `<button type="button" class="mini" data-act="stepMove" data-dir="-1" data-id="${p.id}" data-sid="${s.id}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button>
       <button type="button" class="mini" data-act="stepMove" data-dir="1" data-id="${p.id}" data-sid="${s.id}" ${i === arr.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button>` : ''}
     ${ui.editSteps ? `<button type="button" class="mini del" data-act="stepDel" data-id="${p.id}" data-sid="${s.id}" aria-label="Delete">×</button>` : ''}
   </li>`;
 
   const itemRow = (it) => {
-    const meta = [it.qty ? `×${esc(it.qty)}` : '', esc(it.store || ''), it.cost ? money(parseFloat(it.cost)) : ''].filter(Boolean).join(' · ');
+    const each = parseFloat(it.cost) || 0, q = parseFloat(it.qty) || 1;
+    const price = each ? (q !== 1 ? `${money(each)} ea = ${money(each * q)}` : money(each)) : '';
+    const meta = [it.qty ? `×${esc(it.qty)}` : '', esc(it.store || ''), price].filter(Boolean).join(' · ');
     return `<li class="row ${it.have ? 'done' : ''}">
     <label class="check green"><input type="checkbox" ${it.have ? 'checked' : ''} data-change="itemHave" data-id="${p.id}" data-iid="${it.id}" aria-label="Have it"><span></span></label>
     <div class="grow">
@@ -490,6 +537,8 @@ function viewDetail(p) {
       ${dl ? `<span class="badge ${dl.cls}">${dl.text}</span>` : ''}
       ${p.status === 'done' ? `<span class="badge done">✓ Completed ${p.completedAt ? fmtDate(ymd(new Date(p.completedAt)), { weekday: false }) : ''}</span>` : ''}
       ${isIdle(p) ? `<span class="badge idle">Idle ${daysSince(p.lastWorked || p.created)} days</span>` : ''}
+      ${hours ? `<span class="badge">⏱ ${fmtHours(hours)} logged</span>` : ''}
+      ${matTotal ? `<span class="badge">${money(matTotal)} materials</span>` : ''}
     </div>
   </div>
   <div class="seg status-seg" role="group" aria-label="Status">${Object.entries(STATUSES).map(([k, l]) => `<button type="button" class="${p.status === k ? 'on' : ''}" data-act="setStatus" data-id="${p.id}" data-s="${k}">${l}</button>`).join('')}</div>
@@ -515,12 +564,14 @@ function viewDetail(p) {
   <section class="card">
     <div class="sec-head"><h2>Tools & Materials</h2>
       ${p.items.length ? `<button type="button" class="text-btn" data-act="toggleEditItems">${ui.editItems ? 'Done' : 'Edit'}</button>` : ''}</div>
-    ${p.items.length ? `<div class="row-meta">${need.length ? `${need.length} still needed${cost ? ` · ~${money(cost)}` : ''}` : 'You have everything ✓'}</div>` : ''}
+    ${matTotal ? `<div class="cost-sum"><div><b>${money(matTotal)}</b><span>Materials</span></div><div><b>${money(matHave)}</b><span>Bought</span></div><div><b>${money(matTotal - matHave)}</b><span>To buy</span></div></div>` : ''}
+    ${p.items.length ? `<div class="row-meta">${need.length ? `${need.length} still needed` : 'You have everything ✓'}${matTotal && unpriced ? ` · ${unpriced} material${unpriced === 1 ? '' : 's'} not priced` : ''}${toolTotal ? ` · Tools ${money(toolTotal)}` : ''}</div>` : ''}
     ${need.length ? `<div class="subhead">Need</div><ul class="rows">${need.map(itemRow).join('')}</ul>` : ''}
     ${have.length ? `<div class="subhead">Have</div><ul class="rows">${have.map(itemRow).join('')}</ul>` : ''}
     ${!p.items.length ? '<div class="empty-note">List what you need to buy, borrow or find before you can continue.</div>' : ''}
-    <form class="add-form" data-submit="itemAdd" data-id="${p.id}"><input name="name" id="addItem" placeholder="${ui.itemType === 'tool' ? 'Add tool' : 'Add material'}" enterkeyhint="done" autocomplete="off">
+    <form class="add-form item-add" data-submit="itemAdd" data-id="${p.id}"><input name="name" id="addItem" placeholder="${ui.itemType === 'tool' ? 'Add tool' : 'Add material (e.g. 4x 2×4 boards)'}" enterkeyhint="next" autocomplete="off">
       <div class="seg small" style="flex:none"><button type="button" class="${ui.itemType === 'material' ? 'on' : ''}" data-act="itemType" data-t="material">Mat</button><button type="button" class="${ui.itemType === 'tool' ? 'on' : ''}" data-act="itemType" data-t="tool">Tool</button></div>
+      <input name="cost" id="addItemCost" class="price" placeholder="$ each" inputmode="decimal" enterkeyhint="done" autocomplete="off" aria-label="Price each">
       <button class="add-btn">Add</button></form>
     <datalist id="stores">${stores.map((s) => `<option value="${esc(s)}">`).join('')}</datalist>
   </section>
@@ -539,12 +590,12 @@ function viewDetail(p) {
   </section>
 
   <section class="card">
-    <div class="sec-head"><h2>Work log <small>${hours ? `${+hours.toFixed(2)} hrs total` : ''}</small></h2></div>
+    <div class="sec-head"><h2>Work log <small>${hours ? `${fmtHours(hours)} total` : ''}</small></h2></div>
     <form class="add-form" data-submit="logAdd" data-id="${p.id}"><input name="text" placeholder="What did you work on?" enterkeyhint="done" autocomplete="off"><input name="hours" class="hrs" placeholder="hrs" inputmode="decimal" autocomplete="off"><button class="add-btn">Log</button></form>
     <ul class="rows" style="margin-top:6px">${logs.map((l) => `<li class="row log-entry">
       <span class="when">${relDate(l.at)}</span>
       <span class="row-text">${l.kind === 'step' ? '✓ ' : l.kind === 'status' ? '• ' : ''}${esc(l.text)}</span>
-      ${l.hours ? `<span class="hrs-tag">${+l.hours}h</span>` : ''}
+      ${l.hours ? `<span class="hrs-tag">${fmtHours(l.hours)}</span>` : ''}
       <button type="button" class="mini del" data-act="logDel" data-id="${p.id}" data-lid="${l.id}" aria-label="Delete entry">×</button></li>`).join('')}</ul>
     ${p.log.length > 6 ? `<button type="button" class="text-btn" style="font-size:15px" data-act="toggleLog">${ui.showAllLog ? 'Show less' : `Show all ${p.log.length}`}</button>` : ''}
   </section>
@@ -579,7 +630,7 @@ function viewEdit(p) {
       <label class="field"><span>Steps — one per line, in order</span><textarea name="steps" rows="5" placeholder="Measure the wall\nBuy lumber\nCut boards\nAssemble & finish"></textarea></label>
       <label class="field"><span>Materials needed — one per line</span><textarea name="materials" rows="3" placeholder="4x 2×4 boards\nWood screws\nStain"></textarea></label>
       <label class="field"><span>Tools needed — one per line</span><textarea name="tools" rows="2" placeholder="Miter saw\nDrill"></textarea></label>
-    </div><p class="hint">Tip: start a line with a quantity like “3x” and it'll be saved as the quantity.</p>` : ''}
+    </div><p class="hint">Tip: write “3x Cedar boards $12” and it's saved as quantity 3 at $12 each.</p>` : ''}
     <button type="submit" class="btn primary block">${isNew ? 'Create project' : 'Save changes'}</button>
   </form>`;
 }
@@ -662,6 +713,7 @@ function viewSettings() {
   <section class="card" style="padding-top:2px;padding-bottom:2px">
     <div class="set-row"><span>Theme</span><div class="seg small">${[['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark']].map(([k, l]) => `<button type="button" class="${s.theme === k ? 'on' : ''}" data-act="theme" data-t="${k}">${l}</button>`).join('')}</div></div>
     <div class="set-row"><span>Flag projects idle after</span><select data-change="staleDays">${[[0, 'Never'], [7, '7 days'], [14, '14 days'], [30, '30 days'], [60, '60 days']].map(([v, l]) => `<option value="${v}" ${s.staleDays === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="set-row"><span>Ask time spent<br><small>When you finish a step</small></span><label class="switch"><input type="checkbox" ${s.askTime ? 'checked' : ''} data-change="askTime"><span></span></label></div>
     ${badgeSupported ? `<div class="set-row"><span>App icon badge<br><small>Count of overdue & due-today projects</small></span><label class="switch"><input type="checkbox" ${s.badge ? 'checked' : ''} data-change="badge"><span></span></label></div>` : ''}
   </section>
 
@@ -809,15 +861,34 @@ function exampleProject() {
 /* ---------------- actions ---------------- */
 function findStep(d) { const p = getP(d.id); return [p, p?.steps.find((s) => s.id === d.sid)]; }
 function findItem(d) { const p = getP(d.id); return [p, p?.items.find((i) => i.id === d.iid)]; }
+// "3x Cedar boards $12" → { qty: '3', name: 'Cedar boards', cost: '12' }
 function parseQty(text) {
-  const m = text.match(/^\s*(\d+(?:\.\d+)?)\s*[x×]\s+(.+)$/i);
-  return m ? { qty: m[1], name: m[2].trim() } : { qty: '', name: text.trim() };
+  let t = text.trim(), cost = '';
+  const c = t.match(/^(.*?)\s*[@-]?\s*\$\s*(\d+(?:\.\d+)?)\s*(?:ea|each)?\.?$/i);
+  if (c && c[1].trim()) { t = c[1]; cost = c[2]; }
+  const m = t.match(/^\s*(\d+(?:\.\d+)?)\s*[x×]\s+(.+)$/i);
+  return m ? { qty: m[1], name: m[2].trim(), cost } : { qty: '', name: t.trim(), cost };
 }
-function completeStep(p, s) {
+// Store a completed step's time on the step and on its work-log entry (which feeds the totals).
+function setStepHours(p, s, h) {
+  s.hours = h || 0;
+  let l = p.log.find((x) => x.kind === 'step' && x.sid === s.id)
+    || p.log.find((x) => x.kind === 'step' && !x.sid && x.text === s.text);
+  if (!l) {
+    l = { id: uid(), at: s.doneAt || now(), text: s.text, kind: 'step', hours: 0 };
+    p.log.push(l); p.log.sort((a, b) => b.at.localeCompare(a.at));
+  }
+  l.sid = s.id; l.hours = s.hours;
+}
+async function completeStep(p, s) {
   snapshot();
   s.done = true; s.doneAt = now();
-  addLog(p, s.text, 'step');
+  addLog(p, s.text, 'step'); p.log[0].sid = s.id;
   touch(p, true); save(); render();
+  if (state.settings.askTime) {
+    const h = await timeSheet(s.text);
+    if (h) { setStepHours(p, s, h); save(); render(); }
+  }
   const ns = nextStep(p);
   if (ns) undoToast(`Done! Next: ${ns.text}`);
   else toast('All steps done 🎉', { label: 'Finish project', fn: () => setStatus(p, 'done') });
@@ -856,13 +927,25 @@ const ACTIONS = {
     [p.steps[a], p.steps[b]] = [p.steps[b], p.steps[a]];
     touch(p); save(); render();
   },
+  stepTime: async (d) => {
+    const [p, s] = findStep(d); if (!s) return;
+    const h = await timeSheet(s.text, s.hours || 0);
+    if (h === null) return;
+    setStepHours(p, s, h); touch(p); save(); render();
+  },
   stepDel: (d) => { const [p, s] = findStep(d); if (!s) return; snapshot(); p.steps = p.steps.filter((x) => x !== s); touch(p); save(); render(); undoToast('Step deleted'); },
   focusAddStep: () => { const el = $('#addStep'); el?.scrollIntoView({ block: 'center' }); el?.focus(); },
   toggleEditSteps: () => { ui.editSteps = !ui.editSteps; render(); },
   toggleEditItems: () => { ui.editItems = !ui.editItems; render(); },
   toggleShowDone: () => { ui.showDone = !ui.showDone; render(); },
   toggleLog: () => { ui.showAllLog = !ui.showAllLog; render(); },
-  itemType: (d) => { ui.itemType = d.t; const v = $('#addItem')?.value || ''; render(); const el = $('#addItem'); if (el) { el.value = v; el.focus(); } },
+  itemType: (d) => {
+    ui.itemType = d.t;
+    const v = $('#addItem')?.value || '', c = $('#addItemCost')?.value || '';
+    render();
+    const el = $('#addItem'); if (el) { el.value = v; el.focus(); }
+    const ce = $('#addItemCost'); if (ce) ce.value = c;
+  },
   itemDel: (d) => { const [p, it] = findItem(d); if (!it) return; snapshot(); p.items = p.items.filter((x) => x !== it); touch(p); save(); render(); undoToast('Item deleted'); },
   setStatus: (d) => setStatus(getP(d.id), d.s),
   clearDeadline: (d) => { const p = getP(d.id); p.deadline = ''; touch(p); save(); render(); },
@@ -936,7 +1019,9 @@ const CHANGES = {
   stepToggle: (d, el) => {
     const [p, s] = findStep(d); if (!s) return;
     if (el.checked) return completeStep(p, s);
-    s.done = false; s.doneAt = null; touch(p); save(); render();
+    s.done = false; s.doneAt = null; s.hours = 0;
+    p.log = p.log.filter((l) => !(l.kind === 'step' && l.sid === s.id)); // re-completing asks again; don't double count
+    touch(p); save(); render();
   },
   stepText: (d, el) => {
     const [p, s] = findStep(d); if (!s) return;
@@ -956,6 +1041,7 @@ const CHANGES = {
   waitingOn: (d, el) => { const p = getP(d.id); p.waitingOn = el.value.trim(); touch(p); save(); },
   deadline: (d, el) => { const p = getP(d.id); p.deadline = el.value; touch(p); save(); render(); },
   shopToggle: (d, el) => { const [p, it] = findItem(d); if (!it) return; it.have = el.checked; ui.shopChecked.add(it.id); touch(p); save(); render(); },
+  askTime: (d, el) => { state.settings.askTime = el.checked; save(); },
   staleDays: (d, el) => { state.settings.staleDays = Number(el.value); save(); },
   badge: async (d, el) => {
     if (el.checked && 'Notification' in window && Notification.permission !== 'granted') {
@@ -992,8 +1078,9 @@ const SUBMITS = {
   },
   itemAdd: (d, f) => {
     const p = getP(d.id); const raw = f.name.value.trim(); if (!raw) return;
-    const { qty, name } = parseQty(raw);
-    p.items.push({ id: uid(), name, type: ui.itemType, have: false, qty, cost: '', store: '' });
+    const { qty, name, cost } = parseQty(raw);
+    const price = (f.cost?.value || '').replace(/[^0-9.]/g, '') || cost;
+    p.items.push({ id: uid(), name, type: ui.itemType, have: false, qty, cost: price, store: '' });
     touch(p); save(); ui.focus = '#addItem'; render();
   },
   logAdd: (d, f) => {
