@@ -2,7 +2,7 @@
 /* Workbench — project tracker PWA. All data lives on the device:
    projects in localStorage, photos in IndexedDB. No server. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const KEY = 'workbench.v1';
 const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#30b0c7', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#a2845e', '#8e8e93'];
 const STATUSES = { active: 'Active', waiting: 'Waiting', paused: 'Paused', done: 'Done' };
@@ -992,11 +992,21 @@ const ACTIONS = {
     if (choice === 'edit') go(`#/edit/${p.id}`);
     if (choice === 'share') {
       const ns = nextStep(p), need = neededItems(p);
+      const mats = p.items.filter((i) => i.type !== 'tool');
+      const matTotal = sumCost(mats), matHave = sumCost(mats.filter((i) => i.have));
+      const toolTotal = sumCost(p.items.filter((i) => i.type === 'tool'));
+      const hours = loggedHours(p);
+      const totals = [
+        hours ? `Time logged: ${fmtHours(hours)}` : '',
+        matTotal ? `Materials: ${money(matTotal)} total · ${money(matHave)} bought · ${money(matTotal - matHave)} to buy` : '',
+        toolTotal ? `Tools: ${money(toolTotal)}` : '',
+      ].filter(Boolean).join('\n');
       shareText([
         p.name, p.desc, p.deadline ? `Due: ${fmtDate(p.deadline)}` : '',
+        totals,
         ns ? `Next step: ${ns.text}` : '',
         openSteps(p).length > 1 ? `Remaining steps:\n${openSteps(p).map((s) => `• ${s.text}`).join('\n')}` : '',
-        need.length ? `Still need:\n${need.map((i) => `• ${i.name}${i.qty ? ` ×${i.qty}` : ''}`).join('\n')}` : '',
+        need.length ? `Still need:\n${need.map((i) => `• ${i.name}${i.qty ? ` ×${i.qty}` : ''}${itemCost(i) ? ` (${money(itemCost(i))})` : ''}`).join('\n')}` : '',
       ].filter(Boolean).join('\n\n'), p.name);
     }
     if (choice === 'dup') {
