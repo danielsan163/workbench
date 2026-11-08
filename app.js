@@ -2,7 +2,7 @@
 /* Workbench — project tracker PWA. All data lives on the device:
    projects in localStorage, photos in IndexedDB. No server. */
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const KEY = 'workbench.v1';
 const COLORS = ['#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#30b0c7', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#a2845e', '#8e8e93'];
 const STATUSES = { active: 'Active', waiting: 'Waiting', paused: 'Paused', done: 'Done' };
@@ -68,7 +68,7 @@ function deadlineInfo(p) {
 function blankState() {
   return {
     version: 1, projects: [],
-    settings: { theme: 'auto', staleDays: 14, lastBackup: null, badge: false, askTime: true, installDismissed: false, sort: 'smart', filter: 'open', shopGroup: 'project' },
+    settings: { theme: 'auto', staleDays: 14, lastBackup: null, badge: false, askTime: true, tourDone: false, installDismissed: false, sort: 'smart', filter: 'open', shopGroup: 'project' },
   };
 }
 function normalize(p) {
@@ -318,7 +318,9 @@ function render() {
     case 'p': {
       const p = getP(r[1]);
       if (!p) { location.replace('#/'); return; }
-      v.innerHTML = viewDetail(p); break;
+      v.innerHTML = viewDetail(p);
+      if (p.example && !state.settings.tourDone && !tour) requestAnimationFrame(() => startTour(p.id));
+      break;
     }
     case 'new': v.innerHTML = viewEdit(null); if (restoreDraft($('#pform'))) toast('Restored your unsaved project'); break;
     case 'edit': {
@@ -336,6 +338,7 @@ function render() {
   hydratePhotos();
   if (ui.focus) { const el = $(ui.focus); if (el) el.focus(); ui.focus = null; }
   updateBadges();
+  if (tour) { if (r[0] === 'p' && r[1] === tour.pid) showTour(); else endTour(); }
 }
 
 /* ---------------- views: home ---------------- */
@@ -357,10 +360,12 @@ function viewHome() {
   }
   if (!ps.length) {
     return `<header class="large"><h1>Projects</h1><a class="icon-btn" href="#/new" aria-label="New project">${ICON.plus}</a></header>${banners}
-      <div class="empty"><div class="big">🛠️</div><h2>No projects yet</h2>
+      <div class="empty welcome"><div class="big">🛠️</div><h2>Welcome to Workbench</h2>
       <p>Track what you're building: the next step, what tools and materials you still need, and when it's due.</p>
-      <a class="btn primary" href="#/new">Create a project</a><br>
-      <button class="btn" data-act="loadExample">Load an example</button></div>`;
+      <div class="try-sample"><b>New here? Start with the sample project.</b>
+        A quick guided tour shows how everything works. It takes about a minute, and you can delete the sample when you're done.
+        <button class="btn primary" data-act="loadExample">Try the sample project</button></div>
+      <a class="btn" href="#/new">Or start your own project</a></div>`;
   }
   const open = ps.filter((p) => p.status !== 'done');
   const due = (p) => (p.deadline ? daysUntil(p.deadline) : null);
@@ -529,6 +534,7 @@ function viewDetail(p) {
   return `
   <header class="topbar"><a href="#/"><span class="back-chev">‹</span> Projects</a><span class="tb-title"></span>
     <button type="button" class="tb-btn right" data-act="projMenu" data-id="${p.id}" aria-label="More"><span class="icon-btn">${ICON.more}</span></button></header>
+  ${p.example ? `<div class="banner sample"><div class="grow"><b>Sample project</b>Try things out. It's safe to change anything here.</div><button type="button" class="btn" data-act="startTour" data-id="${p.id}">Take the tour</button></div>` : ''}
   <div class="detail-head" style="--c:${p.color}">
     <div class="dh-cat"><span class="dot"></span>${esc(p.category || 'Project')} · <span class="prio ${p.priority}"></span> ${PRIORITIES[p.priority]} priority</div>
     <h1>${esc(p.name)}</h1>
@@ -727,7 +733,7 @@ function viewSettings() {
 
   <div class="section-title">Data</div>
   <section class="card" style="padding-top:2px;padding-bottom:2px">
-    <button type="button" class="set-row" data-act="loadExample"><span>Add example project</span></button>
+    <button type="button" class="set-row" data-act="loadExample"><span>Add sample project<br><small>Includes a guided tour</small></span></button>
     <button type="button" class="set-row danger" data-act="clearDone"><span>Delete completed projects</span></button>
     <button type="button" class="set-row danger" data-act="eraseAll"><span>Erase all data</span></button>
   </section>
@@ -841,22 +847,89 @@ function exampleProject() {
   const mk = (text, done = false) => ({ id: uid(), text, done, doneAt: done ? now() : null });
   const it = (name, type, extra = {}) => ({ id: uid(), name, type, have: false, qty: '', cost: '', store: '', ...extra });
   const p = normalize({
-    id: uid(), name: 'Garden bench', category: 'Woodworking', color: '#34c759', priority: 'high', status: 'active',
+    id: uid(), example: true, name: 'Garden bench', category: 'Woodworking', color: '#34c759', priority: 'high', status: 'active',
     desc: 'Cedar bench for the back patio, seats two.', deadline: addDays(19), created: now(), lastWorked: now(),
     steps: [mk('Sketch design & cut list', true), mk('Buy cedar boards'), mk('Cut legs and slats to length'), mk('Dry-fit and sand'), mk('Assemble with screws & glue'), mk('Apply two coats of sealer')],
     items: [
       it('Cedar 2×4 (8 ft)', 'material', { qty: '4', cost: '12', store: 'Home Depot' }),
       it('Exterior wood screws', 'material', { qty: '1 box', cost: '9', store: 'Home Depot' }),
       it('Outdoor wood sealer', 'material', { cost: '24', store: 'Lowe’s' }),
-      it('Wood glue (Titebond III)', 'material', { have: true }),
+      it('Wood glue (Titebond III)', 'material', { have: true, cost: '8' }),
       it('Miter saw', 'tool', { have: true }),
       it('Pocket-hole jig', 'tool', { store: 'Borrow from Mike' }),
     ],
     notes: 'Seat height 18". Overall length 48".',
   });
-  addLog(p, 'Finished sketch and cut list', 'note', 1);
+  const s0 = p.steps[0];
+  s0.hours = 1; addLog(p, s0.text, 'step', 1); p.log[0].sid = s0.id;
   return p;
 }
+
+/* ---------------- guided tour (sample project only) ---------------- */
+const TOUR = [
+  { title: 'Welcome to Workbench 👋', text: `This sample project shows how everything works. Tap Next for a quick tour. It takes about a minute.` },
+  { el: () => $('.status-seg'), title: 'Status', text: `Mark a project Active, Waiting, Paused or Done. Choose Waiting to note what you're waiting on, like parts in the mail or paint drying.` },
+  { el: () => $('.next-card'), title: 'Your next step', text: `The next thing to do is always at the top. Tap Done when you finish it. Workbench then asks how long it took, so you can see where your time goes.` },
+  { el: () => $('input[data-change=deadline]')?.closest('.card'), title: 'Deadline', text: `Give a project a deadline to get a countdown. You can also add the deadline to your iPhone Calendar.` },
+  { el: () => $('#addStep')?.closest('.card'), title: 'Steps', text: `Break the work into small steps. Tap a step to rename it, or tap Edit to reorder or delete steps. Finished steps show the time you spent on them.` },
+  { el: () => $('#addItem')?.closest('.card'), title: 'Tools & materials', text: `List what you need and what it costs. Check items off as you get them. The totals show what you've bought and what's left to buy.` },
+  { el: () => $('.photos')?.closest('.card'), title: 'Photos', text: `Add progress photos. The first one is used as the cover on your project list.` },
+  { el: () => $('form[data-submit=logAdd]')?.closest('.card'), title: 'Work log', text: `Log work sessions and hours. Finished steps and status changes are added here automatically.` },
+  { el: () => $('#tabs'), title: 'Shopping & Upcoming', text: `Shopping collects everything you still need from all your projects into one list for the store. Upcoming shows every deadline in date order.` },
+  { el: () => $('[data-act=projMenu]'), title: 'More options', text: `Tap ⋯ to edit, share a summary, duplicate or delete a project.` },
+  { title: `You're all set`, text: `Try things out in this sample project. When you're ready, delete it from the ⋯ menu, then tap + on the Projects screen to start your own.` },
+];
+let tour = null; // { pid, i }
+
+function startTour(pid) { tour = { pid, i: 0 }; showTour(); }
+function endTour() {
+  tour = null; $('#tour')?.remove();
+  if (!state.settings.tourDone) { state.settings.tourDone = true; save(); }
+}
+function showTour() {
+  if (!tour) return;
+  const step = TOUR[tour.i], last = tour.i === TOUR.length - 1;
+  let root = $('#tour');
+  if (!root) { root = document.createElement('div'); root.id = 'tour'; document.body.appendChild(root); }
+  root.innerHTML = `<div class="tour-spot none"></div><div class="tour-bubble" role="dialog" aria-label="Tour">
+    <div class="tour-count">${tour.i + 1} of ${TOUR.length}</div>
+    <div class="tour-title">${esc(step.title)}</div><div class="tour-text">${esc(step.text)}</div>
+    <div class="tour-btns">${last ? '' : '<button type="button" class="text-btn" data-tour="skip">Skip tour</button>'}<span class="grow"></span>
+      ${tour.i ? '<button type="button" class="btn" data-tour="back">Back</button>' : ''}
+      <button type="button" class="btn primary" data-tour="next">${last ? 'Got it' : 'Next'}</button></div></div>`;
+  root.onclick = (e) => {
+    const b = e.target.closest('[data-tour]'); if (!b) return;
+    const a = b.dataset.tour;
+    if (a === 'skip' || (a === 'next' && last)) return endTour();
+    tour.i += a === 'next' ? 1 : -1; showTour();
+  };
+  placeTour(true);
+}
+// Highlight the step's element (scrolling it into view) and park the bubble beside it.
+function placeTour(scroll) {
+  const root = $('#tour'); if (!root || !tour) return;
+  const spot = $('.tour-spot', root), bub = $('.tour-bubble', root);
+  const el = TOUR[tour.i].el?.();
+  const vh = innerHeight, bh = bub.offsetHeight, gap = 14, pad = 6;
+  const topSafe = ($('.topbar')?.getBoundingClientRect().bottom || 0) + 8;
+  if (!el) { spot.className = 'tour-spot none'; bub.style.top = `${Math.max(topSafe, (vh - bh) / 2)}px`; return; }
+  let r = el.getBoundingClientRect();
+  if (scroll && !el.closest('#tabs, .topbar')) {
+    const room = vh - topSafe;
+    const want = r.height + bh + gap * 2 < room ? topSafe + (room - r.height - bh - gap) / 2 : topSafe + bh + gap * 2;
+    window.scrollBy(0, r.top - want);
+    r = el.getBoundingClientRect();
+  }
+  spot.className = 'tour-spot';
+  Object.assign(spot.style, { top: `${r.top - pad}px`, left: `${r.left - pad}px`, width: `${r.width + pad * 2}px`, height: `${r.height + pad * 2}px` });
+  let top;
+  if (r.bottom + pad + gap + bh < vh - 8) top = r.bottom + pad + gap;
+  else if (r.top - pad - gap - bh > 8) top = r.top - pad - gap - bh;
+  else top = vh - bh - 16;
+  bub.style.top = `${top}px`;
+}
+addEventListener('scroll', () => { if (tour) placeTour(false); }, { passive: true });
+addEventListener('resize', () => { if (tour) placeTour(false); });
 
 /* ---------------- actions ---------------- */
 function findStep(d) { const p = getP(d.id); return [p, p?.steps.find((s) => s.id === d.sid)]; }
@@ -912,7 +985,11 @@ const ACTIONS = {
   resumeDraft: () => { const dr = liveDraft(); if (dr) go(`#/${dr.route}`); },
   discardDraft: () => { clearDraft(); render(); },
   dismissInstall: () => { state.settings.installDismissed = true; save(); render(); },
-  loadExample: () => { const p = exampleProject(); state.projects.push(p); save(); go(`#/p/${p.id}`); toast('Example project added'); },
+  loadExample: () => {
+    const p = exampleProject(); state.projects.push(p); save(); go(`#/p/${p.id}`);
+    if (state.settings.tourDone) toast('Sample project added');
+  },
+  startTour: (d) => startTour(d.id),
   stepDone: (d) => { const [p, s] = findStep(d); if (s) completeStep(p, s); },
   stepLater: (d) => {
     const [p, s] = findStep(d); if (!s) return;
@@ -1011,7 +1088,7 @@ const ACTIONS = {
     }
     if (choice === 'dup') {
       const c = normalize({
-        ...JSON.parse(JSON.stringify(p)), id: uid(), name: `${p.name} (copy)`, created: now(), updated: now(),
+        ...JSON.parse(JSON.stringify(p)), id: uid(), example: false, name: `${p.name} (copy)`, created: now(), updated: now(),
         lastWorked: null, completedAt: null, status: 'active', log: [], photos: [], cover: null,
       });
       c.steps.forEach((s) => { s.id = uid(); s.done = false; s.doneAt = null; });
